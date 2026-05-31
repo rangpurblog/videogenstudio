@@ -1,0 +1,125 @@
+========================================================
+  VideoGen Studio — EXE BUILD GUIDE (Developer Only)
+========================================================
+
+USER দের কিছু করতে হবে না।
+শুধু আপনি একবার এই steps follow করবেন, তারপর .exe ফাইলটা users দের দেবেন।
+
+========================================================
+  REQUIREMENTS (আপনার PC তে)
+========================================================
+
+1. Windows 10/11 (x64) — Windows এ build করলে Windows .exe পাবেন
+2. Node.js 18 বা তার উপরে → https://nodejs.org (LTS version নামান)
+3. Git (optional, project copy করতে) → https://git-scm.com
+
+NOTE: FFmpeg আলাদা install করতে হবে না — app এর ভেতরে bundle করা থাকবে।
+
+========================================================
+  STEP 1 — Project folder ready করুন
+========================================================
+
+Project zip বা git clone করে আপনার PC তে রাখুন।
+উদাহরণ: C:\Projects\videogen-studio\
+
+========================================================
+  STEP 2 — Terminal খুলুন
+========================================================
+
+Windows এ:
+  - Start menu → "Command Prompt" বা "PowerShell" খুলুন
+  - অথবা project folder এ Shift+Right Click → "Open PowerShell window here"
+
+========================================================
+  STEP 3 — Dependencies install করুন (প্রথমবার শুধু)
+========================================================
+
+  cd C:\Projects\videogen-studio
+  npm install
+
+এটা সব packages download করবে (2-5 মিনিট লাগতে পারে, internet দরকার)।
+
+========================================================
+  STEP 4 — .ENV file তৈরি করুন (প্রথমবার শুধু)
+========================================================
+
+Project root এ .env নামে একটা file তৈরি করুন এই content দিয়ে:
+
+  VITE_SUPABASE_URL=your_supabase_url_here
+  VITE_SUPABASE_ANON_KEY=your_supabase_anon_key_here
+
+(Supabase project settings থেকে এই values পাবেন)
+
+========================================================
+  STEP 5 — EXE Build করুন
+========================================================
+
+  npm run build:electron
+
+এটা 3-8 মিনিট সময় নেবে। শেষে দুইটা ফাইল তৈরি হবে:
+
+  release\
+  ├── VideoGen Studio Setup 1.0.0.exe        ← INSTALLER (users দের দেওয়ার জন্য)
+  └── VideoGen-Studio-Portable-1.0.0.exe     ← PORTABLE (install ছাড়াই চলে)
+
+========================================================
+  কোনটা user কে দেবেন?
+========================================================
+
+INSTALLER (.exe Setup):
+  ✓ Best for most users
+  ✓ Start Menu shortcut তৈরি হয়
+  ✓ Desktop shortcut তৈরি হয়
+  ✓ Uninstall করা যায় (Control Panel থেকে)
+  ✓ User যেকোনো folder এ install করতে পারবে
+
+PORTABLE (.exe):
+  ✓ Install ছাড়াই চলে — শুধু double-click
+  ✓ USB drive এ রেখে যেকোনো PC তে ব্যবহার করা যায়
+  ✗ Start Menu/Desktop shortcut নেই
+
+RECOMMENDATION: Installer দিন। Users comfortable।
+
+========================================================
+  USER কীভাবে ব্যবহার করবে?
+========================================================
+
+1. "VideoGen Studio Setup 1.0.0.exe" double-click করবে
+2. "Next → Next → Install → Finish" করবে
+3. Desktop এ "VideoGen Studio" icon দেখবে
+4. Double-click করে app open করবে
+5. Settings এ Amazon PAAPI credentials দেবে (optional)
+6. ব্যবহার শুরু করবে
+
+FFmpeg আলাদা install করতে হবে না — app এর ভেতরে আছে।
+Internet connection দরকার (Amazon product fetch এর জন্য)।
+
+========================================================
+  BUILD করতে সমস্যা হলে
+========================================================
+
+ERROR: "Cannot find module 'electron'"
+FIX: npm install
+
+ERROR: "ffmpeg.exe not found" during build
+FIX: এটা warning, ignore করুন — Linux build করলে ffmpeg.exe থাকে না।
+     শুধু Windows build করুন: npm run build:electron
+
+ERROR: "ENOENT: no such file or directory, public/icon.ico"
+FIX: public/ folder এ icon.ico আছে কিনা check করুন।
+
+ERROR: npm install এ "node-pre-gyp" error
+FIX: npm install --ignore-scripts
+
+========================================================
+  VERSION আপডেট করতে চাইলে
+========================================================
+
+package.json খুলুন, "version" field change করুন:
+  "version": "1.0.1"
+
+তারপর আবার: npm run build:electron
+
+নতুন version এর file release\ folder এ পাবেন।
+
+========================================================
