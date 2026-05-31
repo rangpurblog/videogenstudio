@@ -3,10 +3,15 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const settingsStore = require('./settingsStore.cjs');
-const { fetchProductData, extractAsin } = require('./productFetcher.cjs');
-const { downloadProductMedia, readMediaIndex } = require('./mediaDownloader.cjs');
-const { copyAudioFile, deleteAudioFile, getAudioDir } = require('./audioProcessor.cjs');
-const { composeVideo, buildRenderPlan, distributeMedia, scanProductMedia, detectGpuEncoder, validateEncoder } = require('./videoComposer.cjs');
+
+// Lazy-load heavy modules so a native-module failure doesn't crash startup
+let productFetcher, mediaDownloader, audioProcessor, videoComposer;
+function loadModules() {
+  try { productFetcher = require('./productFetcher.cjs'); } catch (e) { console.error('productFetcher load failed:', e.message); }
+  try { mediaDownloader = require('./mediaDownloader.cjs'); } catch (e) { console.error('mediaDownloader load failed:', e.message); }
+  try { audioProcessor = require('./audioProcessor.cjs'); } catch (e) { console.error('audioProcessor load failed:', e.message); }
+  try { videoComposer = require('./videoComposer.cjs'); } catch (e) { console.error('videoComposer load failed:', e.message); }
+}
 
 const isDev = process.env.NODE_ENV === 'development';
 let mainWindow;
@@ -32,8 +37,14 @@ function createWindow() {
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
+    mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    // In asar builds __dirname points inside the asar; app.getAppPath() gives the root
+    const distIndex = path.join(app.getAppPath(), 'dist', 'index.html');
+    mainWindow.loadFile(distIndex).catch((err) => {
+      // Fallback: try relative to __dirname (unpacked builds)
+      mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    });
   }
 
   mainWindow.on('closed', () => { mainWindow = null; });
@@ -41,6 +52,7 @@ function createWindow() {
 
 app.whenReady().then(() => {
   settingsStore.init(app);
+  loadModules();
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -68,6 +80,7 @@ ipcMain.handle('settings-save', (_event, settings) => settingsStore.save(setting
 // ── Generate video ────────────────────────────────────────────────────────────
 
 ipcMain.handle('generate-video', async (_event, payload) => {
+  if (!videoComposer) return { success: false, error: 'videoComposer not available' };
   const {
     timelineSegments,
     audioMode = 'single',
@@ -86,7 +99,7 @@ ipcMain.handle('generate-video', async (_event, payload) => {
     mainWindow?.webContents.send('video-compose-progress', { message });
   };
 
-  return composeVideo({
+  return videoComposer.composeVideo({
     timelineSegments,
     audioMode,
     style,
@@ -104,19 +117,18 @@ ipcMain.handle('generate-video', async (_event, payload) => {
 
 ipcMain.handle('detect-gpu', async () => {
   try {
-    const detected = await detectGpuEncoder();
-    return await validateEncoder(detected);
+    if (!videoComposer) return { encoder: 'libx264', type: 'cpu', label: 'CPU (libx264)' };
+    const detected = await videoComposer.detectGpuEncoder();
+    return await videoComposer.validateEncoder(detected);
   } catch (err) {
     return { encoder: 'libx264', type: 'cpu', label: 'CPU (libx264)' };
   }
 });
 
 // ── Product fetch + media download ───────────────────────────────────────────
-//
-// Unified handler: calls PAAPI/Puppeteer for metadata, then streams all
-// assets through mediaDownloader for dedup, structuring, and optimization.
 
 ipcMain.handle('fetch-product', async (_event, { jobId, productUrl, productIndex }) => {
+  if (!productFetcher) return { success: false, jobId, productIndex, error: 'productFetcher not available', title: '', images: [], videos: [], source: 'failed' };
   const settings = settingsStore.load();
   const mediaBaseDir = settingsStore.mediaDir();
   const credentials = {
@@ -131,7 +143,7 @@ ipcMain.handle('fetch-product', async (_event, { jobId, productUrl, productIndex
   };
 
   try {
-    const result = await fetchProductData(productUrl, credentials, mediaBaseDir, productIndex, sendProgress);
+    const result = await productFetcher.fetchProductData(productUrl, credentials, mediaBaseDir, productIndex, sendProgress);
     return { success: true, jobId, productIndex, ...result };
   } catch (err) {
     return { success: false, jobId, productIndex, error: err.message, title: '', images: [], videos: [], source: 'failed' };
@@ -141,6 +153,7 @@ ipcMain.handle('fetch-product', async (_event, { jobId, productUrl, productIndex
 ipcMain.handle('fetch-all-products', async (_event, { products }) => {
   const results = [];
   for (const { jobId, productUrl, productIndex } of products) {
+    if (!productFetcher) { results.push({ success: false, jobId, productIndex, error: 'productFetcher not available', title: '', images: [], videos: [], source: 'failed' }); continue; }
     const settings = settingsStore.load();
     const mediaBaseDir = settingsStore.mediaDir();
     const credentials = {
@@ -153,7 +166,7 @@ ipcMain.handle('fetch-all-products', async (_event, { products }) => {
       mainWindow?.webContents.send('fetch-product-progress', { jobId, productIndex, message });
     };
     try {
-      const r = await fetchProductData(productUrl, credentials, mediaBaseDir, productIndex, sendProgress);
+      const r = await productFetcher.fetchProductData(productUrl, credentials, mediaBaseDir, productIndex, sendProgress);
       results.push({ success: true, jobId, productIndex, ...r });
     } catch (err) {
       results.push({ success: false, jobId, productIndex, error: err.message, title: '', images: [], videos: [], source: 'failed' });
@@ -164,69 +177,67 @@ ipcMain.handle('fetch-all-products', async (_event, { products }) => {
 
 // ── Media library ─────────────────────────────────────────────────────────────
 
-// Re-download media for a product given pre-fetched URL lists
 ipcMain.handle('download-product-media', async (_event, { jobId, productIndex, title, imageUrls, videoUrls }) => {
+  if (!mediaDownloader) return { success: false, jobId, productIndex, error: 'mediaDownloader not available' };
   const mediaBaseDir = settingsStore.mediaDir();
   const sendProgress = (message) => {
     mainWindow?.webContents.send('download-media-progress', { jobId, productIndex, message });
   };
   try {
-    const result = await downloadProductMedia({ productIndex, title, imageUrls, videoUrls, mediaBaseDir, onProgress: sendProgress });
+    const result = await mediaDownloader.downloadProductMedia({ productIndex, title, imageUrls, videoUrls, mediaBaseDir, onProgress: sendProgress });
     return { success: true, jobId, ...result };
   } catch (err) {
     return { success: false, jobId, productIndex, error: err.message };
   }
 });
 
-// Scan media directory and return all product manifests
 ipcMain.handle('get-media-index', () => {
+  if (!mediaDownloader) return [];
   const mediaBaseDir = settingsStore.mediaDir();
-  return readMediaIndex(mediaBaseDir);
+  return mediaDownloader.readMediaIndex(mediaBaseDir);
 });
 
-// Open a folder in the OS file manager
 ipcMain.handle('open-folder', (_event, folderPath) => {
   return shell.openPath(folderPath);
 });
 
-// Return the current media base directory path
 ipcMain.handle('get-media-dir', () => settingsStore.mediaDir());
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
 
-// Copy a dropped/selected audio file into the project audio directory.
-// sourcePath comes from File.path (Electron renderer extension).
 ipcMain.handle('save-audio-file', async (_event, { sourcePath, mode, productIndex, originalName }) => {
+  if (!audioProcessor) return { success: false, error: 'audioProcessor not available' };
   try {
-    const audioBaseDir = getAudioDir(settingsStore.mediaDir());
-    const result = copyAudioFile({ sourcePath, mode, productIndex, audioBaseDir, originalName });
+    const audioBaseDir = audioProcessor.getAudioDir(settingsStore.mediaDir());
+    const result = audioProcessor.copyAudioFile({ sourcePath, mode, productIndex, audioBaseDir, originalName });
     return { success: true, ...result };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
 
-// Delete an audio file from disk.
 ipcMain.handle('delete-audio-file', (_event, localPath) => {
+  if (!audioProcessor) return { success: false, error: 'audioProcessor not available' };
   try {
-    deleteAudioFile(localPath);
+    audioProcessor.deleteAudioFile(localPath);
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
   }
 });
 
-// Return the audio directory path.
-ipcMain.handle('get-audio-dir', () => getAudioDir(settingsStore.mediaDir()));
+ipcMain.handle('get-audio-dir', () => {
+  if (!audioProcessor) return '';
+  return audioProcessor.getAudioDir(settingsStore.mediaDir());
+});
 
 // ── Distribution preview ──────────────────────────────────────────────────────
-// Compute the clip distribution plan for a set of product segments without
-// running FFmpeg. Used by the UI to render a visual preview.
 
 ipcMain.handle('preview-distribution', (_event, { timelineSegments, style, quality }) => {
+  if (!videoComposer) return { success: false, error: 'videoComposer not available' };
   try {
     const mediaDir = settingsStore.mediaDir();
-    const plan = buildRenderPlan({
+    const plan = videoComposer.buildRenderPlan({
       timelineSegments,
       mediaDir,
       audioMode: 'single',
